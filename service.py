@@ -287,6 +287,7 @@ async def insert_uploaded_recording_conversational_insights(
                 "feedback": insight.get("Verbatim"),
                 "feedback_at": datetime.datetime.now().isoformat(),
                 "feedback_insight_id": insight.get("feedback_insight_id"),
+                "source": insight.get("source")
             }
 
             print(f"Inserting feedback data: {json.dumps(data, default=str)}")
@@ -923,6 +924,7 @@ async def analyze_uploaded_recording(
                                 insight["feedback_insight_id"] = feedback_insight_id
 
                             print(f"Inserted into feedback_insights table with id: {feedback_insight_id}")
+                            insight["source"] = source_type
                             unique_insights.append(insight) 
                         except Exception as e:
                             print(f"Error inserting into tables: {str(e)}")
