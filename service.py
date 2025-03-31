@@ -910,7 +910,8 @@ async def analyze_uploaded_recording(
                                 "feedback": insight.get("Verbatim"),
                                 "embeddings": embeddings,
                                 "input_tokens": input_tokens,
-                                "output_tokens": output_tokens
+                                "output_tokens": output_tokens,
+                                "source": source_type
                             }
                             
                             feedback_response = await asyncio.to_thread(
