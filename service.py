@@ -386,8 +386,8 @@ async def process_single_clip(clip_info, temp_file_path):
                 print(f"Error removing temp audio file: {e}")
 
 # Upload conversational insight clip into supabase
-async def upload_clip_to_supabase(clip_path, file_name, workspace_id):
-    full_path = f"{workspace_id}/{file_name}"
+async def upload_clip_to_supabase(clip_path, file_name, workspace_id, title):
+    full_path = f"{workspace_id}/{title}/{file_name}"
         
     try:
         with open(clip_path, "rb") as file_stream:
@@ -399,7 +399,7 @@ async def upload_clip_to_supabase(clip_path, file_name, workspace_id):
         raise RuntimeError(f"Error uploading clip to Supabase: {e}")
 
 # Process conversation insight clips
-async def process_clips(workspace_id: str, temp_file_path: str, clips):
+async def process_clips(workspace_id: str, temp_file_path: str, clips, title: str):
     """Process and upload all clips."""
     uploaded_files = []
     max_retries = 3  
@@ -422,13 +422,13 @@ async def process_clips(workspace_id: str, temp_file_path: str, clips):
                 # Generate the filename for storage
                 file_name = f"clip_{feedback_id}.mp4"
                 
-                print(f"Uploading clip to {workspace_id}/{file_name}")
+                print(f"Uploading clip to {workspace_id}/{title}/{file_name}")
                 
                 # Upload the clip to Supabase
-                await upload_clip_to_supabase(processed_clip_path, file_name, workspace_id)
+                await upload_clip_to_supabase(processed_clip_path, file_name, workspace_id, title)
 
                 # Record the full path to the uploaded file
-                uploaded_file_full_path = f"{workspace_id}/{file_name}"
+                uploaded_file_full_path = f"{workspace_id}/{title}/{file_name}"
                 uploaded_files.append({
                     "feedback_id": feedback_id,
                     "uploaded_file_full_path": uploaded_file_full_path
@@ -874,7 +874,7 @@ async def analyze_uploaded_recording(
                     if similar_feedback_insight_id:
                         # If similar insight found, just insert into feedback table
                         insight["similar_feedback_insight_id"] = similar_feedback_insight_id
-                        
+                        print(f"Similar feedback insight id: {similar_feedback_insight_id}")
                         try:
                             feedback_data = {
                                 "workspace_id": workspace_id,
@@ -896,8 +896,8 @@ async def analyze_uploaded_recording(
                         except Exception as e:
                             print(f"Error inserting into feedback table: {str(e)}")
                     else:
-                        unique_insights.append(insight)
                         # If no similar insight, insert into both tables
+                        print(f"No similar insight found, inserting into feedback_insights table")
                         try:
                             # First insert into feedback_insights
                             feedback_insights_data = {
@@ -919,9 +919,11 @@ async def analyze_uploaded_recording(
                             )
                             
                             if feedback_response.data and len(feedback_response.data) > 0:
-                                feedback_insight_id = feedback_response.data[0].get("feedback_insight_id")
+                                feedback_insight_id = feedback_response.data[0].get("feedback_insights_id")
                                 insight["feedback_insight_id"] = feedback_insight_id
-                             
+
+                            print(f"Inserted into feedback_insights table with id: {feedback_insight_id}")
+                            unique_insights.append(insight) 
                         except Exception as e:
                             print(f"Error inserting into tables: {str(e)}")
 
@@ -951,7 +953,7 @@ async def analyze_uploaded_recording(
 
             try:
                 print(f"Starting to process {len(clips)} clips")
-                clip_result = await process_clips(workspace_id, temp_video_file_path, clips)
+                clip_result = await process_clips(workspace_id, temp_video_file_path, clips, title)
                 print(f"Successfully processed clips. Result: {clip_result}")
                 
             except Exception as e:
