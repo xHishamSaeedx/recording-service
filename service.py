@@ -8,7 +8,8 @@ from config import (
     OPENAI_API_KEY,
     OPENAI_MODEL,
     SUPABASE_URL,
-    GEMINI_MODEL
+    GEMINI_MODEL,
+    ASSEMBLYAI_API_KEY
 )
 import mimetypes
 from urllib.parse import urlparse
@@ -43,10 +44,14 @@ from embeddings import get_embeddings
 from vader_sentiment import get_vader_sentiment
 from similarity import find_similar_feedbacks
 import datetime
+import assemblyai as aai
 
 
 # Configure the API key
 genai.configure(api_key=GEMINI_API_KEY)
+
+# Add AssemblyAI config after other configs
+aai.settings.api_key = ASSEMBLYAI_API_KEY # Replace with your key
 
 CHUNK_DURATION_MS = 1 * 60 * 1000  # 5 minutes in milliseconds
 
@@ -79,67 +84,6 @@ def extract_audio_from_video(video_file_path: str, temp_audio_dir: str) -> str:
         raise
     finally:
         print("Audio extraction completed")
-
-
-def split_audio_into_chunks(full_audio_path: str, temp_audio_dir: str) -> list:
-    """
-    Splits a WAV audio file into chunks of specified duration.
-    
-    Args:
-        full_audio_path: Path to the full audio file
-        temp_audio_dir: Directory to save the chunks
-        
-    Returns:
-        list: List of dictionaries containing chunk information
-    """
-    print("Starting audio splitting")
-    audio_chunks_info = []
-    
-    try:
-        # Load the full audio using pydub
-        full_audio = AudioSegment.from_file(full_audio_path, format="wav")
-        total_duration_ms = len(full_audio)
-        chunk_number = 0
-
-        # Loop through the full audio and create chunks
-        for start_time_ms in range(0, total_duration_ms, CHUNK_DURATION_MS):
-            # Determine the end time for the current chunk
-            end_time_ms = min(start_time_ms + CHUNK_DURATION_MS, total_duration_ms)
-            
-            # Extract the chunk
-            audio_chunk = full_audio[start_time_ms:end_time_ms]
-            
-            # Create a path for the chunk file
-            chunk_path = os.path.join(temp_audio_dir, f"chunk_{chunk_number}.mp3")
-            
-            # Export the chunk to an audio file
-            audio_chunk.export(chunk_path, format="mp3")
-            
-            # Store chunk info including timing
-            audio_chunks_info.append({
-                "path": chunk_path,
-                "start_time": start_time_ms,
-                "end_time": end_time_ms,
-                "duration": end_time_ms - start_time_ms
-            })
-            
-            print(f"Created audio chunk: {chunk_path} (start: {start_time_ms}ms, end: {end_time_ms}ms)")
-            chunk_number += 1
-
-        print("Audio chunking completed successfully")
-        return audio_chunks_info
-
-    except Exception as e:
-        print(f"An error occurred during audio splitting: {e}")
-        raise
-    finally:
-        # Clean up the full audio file as it's no longer needed
-        try:
-            if os.path.exists(full_audio_path):
-                os.remove(full_audio_path)
-                print(f"Removed full audio file: {full_audio_path}")
-        except OSError as e:
-            print(f"Error removing full audio file: {e}")
 
 
 async def check_balance(
@@ -520,97 +464,71 @@ async def process_clips(workspace_id: str, temp_file_path: str, clips):
 
 def transcribe_audio(audio_file_path, max_retries=3):
     """
-    Transcribe the given audio file and return the transcription as a JSON object.
+    Transcribe the given audio file using AssemblyAI and return the transcription.
     """
     attempt = 0
     while attempt < max_retries:
         try:
-            myfile = genai.upload_file(audio_file_path)
-            model = genai.GenerativeModel(GEMINI_MODEL)
-
-            prompt = """
-            Transcribe the uploaded audio file and provide the output in JSON format.
+            # Initialize transcriber
+            transcriber = aai.Transcriber()
             
-            Rules:
-            1. Only return valid JSON - no markdown, no extra text
-            2. Use this exact structure:
-            {
-                "error": null,
-                "audio_duration": <duration_in_ms>,
-                "utterances": [
-                    {
-                        "text": "<transcribed_text>",
-                        "speaker": "<speaker_id>", 
-                        "start": <start_time_ms>,
-                        "end": <end_time_ms>,
-                        "sentiment": "<POSITIVE|NEGATIVE|NEUTRAL>",
-                        "confidence": <confidence_score>
-                    }
-                ]
+            # Configure transcription parameters
+            config = aai.TranscriptionConfig(
+                speaker_labels=True,
+                auto_highlights=True,
+                summarization=True,
+                entity_detection=True,
+                sentiment_analysis=True,
+                language_code="en_us",
+                punctuate=True,
+                format_text=True,
+                content_safety=True,
+                iab_categories=True,
+                speakers_expected=2
+            )
+            
+            # Start transcription with config
+            transcript = transcriber.transcribe(
+                audio_file_path,
+                config=config
+            )
+
+            if transcript.status == aai.TranscriptStatus.error:
+                print(f"Transcription error: {transcript.error}")
+                raise Exception(transcript.error)
+
+            # Convert AssemblyAI response to our expected format
+            formatted_response = {
+                "error": None,
+                "audio_duration": transcript.audio_duration,
+                "utterances": []
             }
 
-            3. For unknown speakers use "Speaker 1", "Speaker 2" etc.
-            4. If you can't determine timing, use 0 for start and estimated duration for end
-            5. Default confidence to 1.0 if uncertain
-            6. Default sentiment to "NEUTRAL" if uncertain
-            """
+            # Process utterances with speaker information
+            for utterance in transcript.utterances:
+                formatted_utterance = {
+                    "text": utterance.text,
+                    "speaker": f"Speaker {utterance.speaker}",
+                    "start": utterance.start,  # AssemblyAI provides times in milliseconds
+                    "end": utterance.end,
+                    # Get sentiment from utterance if available, otherwise default to NEUTRAL
+                    "sentiment": utterance.sentiment.upper() if hasattr(utterance, 'sentiment') else "NEUTRAL",
+                    "confidence": utterance.confidence if hasattr(utterance, 'confidence') else 1.0
+                }
+                formatted_response["utterances"].append(formatted_utterance)
 
-            response = model.generate_content([myfile, prompt])
-            
-            # Extract just the JSON portion from the response
-            response_text = response.text
-            
-            # Try to find JSON content between curly braces
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if not json_match:
-                raise ValueError("No JSON object found in response")
-                
-            json_string = json_match.group(0)
-            
-            # Clean up any markdown formatting
-            json_string = json_string.replace('```json', '').replace('```', '').strip()
-            
-            # Parse the JSON
-            transcript_json = json.loads(json_string)
-            
-            # Validate required fields
-            if not isinstance(transcript_json, dict):
-                raise ValueError("Response is not a JSON object")
-                
-            required_fields = ["error", "audio_duration", "utterances"]
-            if not all(field in transcript_json for field in required_fields):
-                raise ValueError("Missing required fields in JSON response")
-                
-            # Validate and clean utterances
-            for utterance in transcript_json["utterances"]:
-                utterance["start"] = int(utterance.get("start", 0))
-                utterance["end"] = int(utterance.get("end", transcript_json["audio_duration"]))
-                utterance["confidence"] = float(utterance.get("confidence", 1.0))
-                utterance["sentiment"] = utterance.get("sentiment", "NEUTRAL").upper()
-                utterance["speaker"] = utterance.get("speaker", "Unknown")
-                
-                if not utterance.get("text"):
-                    raise ValueError("Utterance missing required text field")
+            return formatted_response
 
-            return transcript_json
-
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON on attempt {attempt + 1}: {str(e)}")
-            print(f"Raw response: {response_text if 'response_text' in locals() else 'No response'}")
         except Exception as e:
             print(f"Error on attempt {attempt + 1}: {str(e)}")
-            if 'response_text' in locals():
-                print(f"Raw response: {response_text}")
-        
-        attempt += 1
-        time.sleep(2)  # Add delay between retries
-    
-    # If all attempts failed, return error response
-    return {
-        "error": f"Failed to transcribe audio after {max_retries} attempts",
-        "audio_duration": 0,
-        "utterances": []
-    }
+            attempt += 1
+            if attempt >= max_retries:
+                return {
+                    "error": f"Failed to transcribe audio after {max_retries} attempts: {str(e)}",
+                    "audio_duration": 0,
+                    "utterances": []
+                }
+            time.sleep(2)  # Add delay between retries
 
 
 
@@ -697,10 +615,10 @@ async def supabase_upload(file_path, workspace_id):
 
 async def download_video(url: str) -> str:
     """
-    Downloads a video from either GCS or a direct URL and returns the local file path.
+    Downloads a video from GCS, Google Drive, or a direct URL and returns the local file path.
     
     Args:
-        url (str): The URL of the video (either GCS URL starting with 'gs://' or direct URL)
+        url (str): The URL of the video (GCS URL starting with 'gs://', Google Drive URL, or direct URL)
         
     Returns:
         str: Path to the downloaded video file
@@ -722,6 +640,65 @@ async def download_video(url: str) -> str:
             await asyncio.to_thread(blob.download_to_filename, temp_video_file_path)
             print(f"Downloaded video from GCS to temporary file: {temp_video_file_path}")
             
+        elif 'drive.google.com' in url:
+            # Handle Google Drive URL
+            # Extract file ID from URL
+            file_id = None
+            if 'id=' in url:
+                file_id = url.split('id=')[-1].split('&')[0]
+            
+            if not file_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not extract Google Drive file ID from URL"
+                )
+
+            # Construct direct download URL
+            download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+            
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                
+                async with session.get(download_url, headers=headers, allow_redirects=True) as response:
+                    if response.status != 200:
+                        # Try alternative download URL
+                        alt_download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                        async with session.get(alt_download_url, headers=headers, allow_redirects=True) as alt_response:
+                            if alt_response.status != 200:
+                                raise HTTPException(
+                                    status_code=alt_response.status,
+                                    detail="Failed to download file from Google Drive"
+                                )
+                            
+                            content_type = alt_response.headers.get('content-type', '')
+                            if 'text/html' in content_type:
+                                # Handle large file confirmation page
+                                body = await alt_response.text()
+                                if 'confirm=' in body:
+                                    confirm_token = body.split('confirm=')[1].split('&')[0]
+                                    final_url = f"{alt_download_url}&confirm={confirm_token}"
+                                    
+                                    async with session.get(final_url, headers=headers) as final_response:
+                                        if final_response.status != 200:
+                                            raise HTTPException(
+                                                status_code=final_response.status,
+                                                detail="Failed to download file from Google Drive after confirmation"
+                                            )
+                                        with open(temp_video_file_path, 'wb') as f:
+                                            async for chunk in final_response.content.iter_chunked(8192):
+                                                f.write(chunk)
+                            else:
+                                with open(temp_video_file_path, 'wb') as f:
+                                    async for chunk in alt_response.content.iter_chunked(8192):
+                                        f.write(chunk)
+                    else:
+                        with open(temp_video_file_path, 'wb') as f:
+                            async for chunk in response.content.iter_chunked(8192):
+                                f.write(chunk)
+                                
+                print(f"Downloaded video from Google Drive to temporary file: {temp_video_file_path}")
         else:
             # Handle direct URLs
             async with aiohttp.ClientSession() as session:
@@ -737,6 +714,13 @@ async def download_video(url: str) -> str:
                         async for chunk in response.content.iter_chunked(8192):
                             f.write(chunk)
                     print(f"Downloaded video from URL to temporary file: {temp_video_file_path}")
+
+        # Verify the downloaded file is a valid video
+        if os.path.getsize(temp_video_file_path) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Downloaded file is empty"
+            )
 
         return temp_video_file_path
 
@@ -798,84 +782,46 @@ async def analyze_uploaded_recording(
         with VideoFileClip(temp_video_file_path) as video:
             video_duration = video.duration  # Duration in seconds
             
-        # Create a temporary directory for storing extracted audio files
+        # Create a temporary directory for storing extracted audio file
         with tempfile.TemporaryDirectory() as temp_audio_dir:
-            # First extract audio from video
+            # Extract audio from video
             full_audio_path = extract_audio_from_video(temp_video_file_path, temp_audio_dir)
             
-            # Then split the audio into chunks
-            audio_chunks_info = split_audio_into_chunks(full_audio_path, temp_audio_dir)
+            print(f"Processing full audio file")
+            print(f"Audio file path: {full_audio_path}")
+            
+            # Transcribe the entire audio file at once
+            transcript = transcribe_audio(full_audio_path)
+            
+            if transcript.get("error"):
+                print(f"Transcription error: {transcript['error']}")
+                raise HTTPException(status_code=500, detail=f"Error in getting transcript: {transcript['error']}")
+                
+            print("Successfully transcribed audio")
 
-            transcripts = []
-            # Process each extracted audio file for transcription
-            for index, audio_file_info in enumerate(audio_chunks_info):
-                try:
-                    audio_file_path = audio_file_info["path"]
-                    print(f"Processing audio chunk {index + 1}/{len(audio_chunks_info)}")
-                    print(f"Audio file path: {audio_file_path}")
-                    
-                    transcript = transcribe_audio(audio_file_path)
-                    
-                    if transcript.get("error"):
-                        print(f"Transcription error: {transcript['error']}")
-                        raise HTTPException(status_code=500, detail=f"Error in getting transcript: {transcript['error']}")
-                        
-                    print(f"Successfully transcribed chunk {index + 1}")
-                    transcripts.append(transcript)
-
-                    # Clean up the audio file immediately after transcription
-                    try:
-                        os.remove(audio_file_path)
-                        print(f"Removed audio file: {audio_file_path}")
-                    except OSError as e:
-                        print(f"Error removing audio file {audio_file_path}: {e}")
-
-                except Exception as e:
-                    print(f"Error processing audio chunk {index}: {str(e)}")
-                    # Clean up the file even if transcription failed
-                    if os.path.exists(audio_file_path):
-                        try:
-                            os.remove(audio_file_path)
-                            print(f"Removed audio file after error: {audio_file_path}")
-                        except OSError as cleanup_err:
-                            print(f"Error removing audio file after error {audio_file_path}: {cleanup_err}")
-                    raise
-
-            # Final cleanup check - remove any remaining audio files
-            remaining_files = os.listdir(temp_audio_dir)
-            if remaining_files:
-                print(f"Found {len(remaining_files)} remaining files in temp directory. Cleaning up...")
-                for filename in remaining_files:
-                    file_path = os.path.join(temp_audio_dir, filename)
-                    try:
-                        if os.path.isfile(file_path):
-                            os.remove(file_path)
-                            print(f"Cleaned up remaining file: {file_path}")
-                        elif os.path.isdir(file_path):
-                            os.rmdir(file_path)
-                            print(f"Cleaned up remaining directory: {file_path}")
-                    except OSError as e:
-                        print(f"Error cleaning up remaining file/directory {file_path}: {e}")
-
-            merged_transcript = merge_transcripts(transcripts)
+            # Clean up the audio file
+            try:
+                os.remove(full_audio_path)
+                print(f"Removed audio file: {full_audio_path}")
+            except OSError as e:
+                print(f"Error removing audio file {full_audio_path}: {e}")
 
             # Create a temporary JSON file
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as json_file:
-                json.dump(merged_transcript, json_file, indent=4)
+                json.dump(transcript, json_file, indent=4)
                 transcript_file = json_file.name
 
             print(f"Transcript saved to temporary file: {transcript_file}")
 
             transcriptFilePath = await supabase_upload(transcript_file, workspace_id)
 
-            # Now delete the temporary file using os.remove
+            # Delete the temporary file
             try:
                 if os.path.exists(transcript_file):
                     os.remove(transcript_file)
                     print(f"Temporary file deleted: {transcript_file}")
             except Exception as e:
                 print(f"Error deleting the file: {e}")
-
 
             parsed_utterances = [
                 {
@@ -886,7 +832,7 @@ async def analyze_uploaded_recording(
                     "sentiment": utterance.get("sentiment", "NEUTRAL"),
                     "confidence": utterance.get("confidence", 1.0)
                 }
-                for utterance in merged_transcript["utterances"]
+                for utterance in transcript["utterances"]
             ]
 
             # Step 3: Infer insights from the LLM using the parsed transcript and product brief
@@ -900,7 +846,7 @@ async def analyze_uploaded_recording(
             input_tokens = llm_inference_result.get("prompt_tokens")
             output_tokens = llm_inference_result.get("completion_tokens")
             action_items = json.dumps(llm_inference_result.get("action_items"))
-            durationSeconds = merged_transcript["audio_duration"]
+            durationSeconds = transcript["audio_duration"]
 
             # Initialize list to store unique insights
             unique_insights = []
