@@ -573,8 +573,11 @@ def merge_transcripts(transcripts):
 
 
 
-async def supabase_upload(file_path, workspace_id):
-    """Upload a file to Supabase storage asynchronously in the format workspace_id/filename and return the file URL."""
+async def supabase_upload(file_path, workspace_id, title):
+    """
+    Upload a file to Supabase storage asynchronously in the format workspace_id/title/transcript.json 
+    and return the file URL.
+    """
     try:
         # Check if the file exists
         if not os.path.exists(file_path):
@@ -584,12 +587,9 @@ async def supabase_upload(file_path, workspace_id):
         # Read the file data into memory asynchronously
         async with aiofiles.open(file_path, 'rb') as file:
             file_data = await file.read()
-        
-        # Extract the filename from the file path
-        filename = os.path.basename(file_path)
 
-        # Construct the full path using workspace_id and filename
-        full_path = f"{workspace_id}/{filename}"
+        # Construct the full path using workspace_id/title/transcript.json
+        full_path = f"{workspace_id}/{title}/transcript.json"
 
         # Use asyncio.to_thread to perform the blocking upload operation
         response = await asyncio.to_thread(
@@ -814,7 +814,7 @@ async def analyze_uploaded_recording(
 
             print(f"Transcript saved to temporary file: {transcript_file}")
 
-            transcriptFilePath = await supabase_upload(transcript_file, workspace_id)
+            transcriptFilePath = await supabase_upload(transcript_file, workspace_id, title)
 
             # Delete the temporary file
             try:

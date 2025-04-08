@@ -3,7 +3,7 @@ import numpy as np
 from supabase_client import supabase
 import asyncio
 
-async def find_similar_feedbacks(embeddings: list[float], workspace_id: str, threshold: float = 0.55):
+async def find_similar_feedbacks(embeddings: list[float], workspace_id: str, threshold: float = 0.7):
     """
     Find similar feedbacks using cosine similarity
     Returns feedbacks with similarity score above threshold and the most similar feedback_insight_id
