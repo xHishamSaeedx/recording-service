@@ -18,7 +18,7 @@ from typing import AsyncIterator
 import os
 from dotenv import load_dotenv
 import math
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 from moviepy.editor import VideoFileClip
 from datetime import datetime, timedelta
 import tempfile
